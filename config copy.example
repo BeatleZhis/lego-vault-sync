@@ -1,0 +1,10 @@
+DNSProvider: regru
+vault:
+  address: "https://vault.example.com:8800/"
+  token: "aaabbbbbcccc"
+  mountPath: tls
+certs:
+  email: example@example.com
+  domains:
+    - "*.example"
+    - "*stage.example"
