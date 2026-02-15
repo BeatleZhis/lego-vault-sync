@@ -1,6 +1,7 @@
 package main
 
 import (
+	"BeatleZhis/lego-vault-sync/config"
 	"BeatleZhis/lego-vault-sync/lego"
 	"BeatleZhis/lego-vault-sync/vault"
 	"os"
@@ -18,38 +19,21 @@ func init() {
 	log.SetLevel(log.DebugLevel)
 }
 
-type Config struct {
-	DNSProvider string `yaml:"DNSProvider"`
-	Vault       struct {
-		Address   string `yaml:"address"`
-		Token     string `yaml:"token"`
-		MountPath string `yaml:"mountPath"`
-	} `yaml:"vault"`
-	Certs struct {
-		Email   string   `yaml:"email"`
-		Domains []string `yaml:"domains,flow"`
-	} `yaml:"certs"`
-}
-
-func ReadConfig() (Config, error) {
-	var config Config
+func ReadConfig() (config.Config, error) {
+	var cfg config.Config
 	file, err := os.Open("config.yaml")
 	if err != nil {
-		return config, err
+		return cfg, err
 	}
 	defer file.Close()
 	decoder := yaml.NewDecoder(file)
-	err = decoder.Decode(&config)
+	err = decoder.Decode(&cfg)
 	if err != nil {
 		log.Error("Ошибка десериализации YAML:", err)
-		return config, err
+		return cfg, err
 	}
-	return config, nil
+	return cfg, nil
 }
-
-// func GetCert(client *lego.Client, domain string) {
-// 	certificates, err := lego.GetCert(client, []string{"*.test.zhis.su", "*.test2.zhis.su"})
-// }
 
 func main() {
 	config, err := ReadConfig()
@@ -62,12 +46,12 @@ func main() {
 		log.Fatal(err)
 	}
 	// Lego client
-	client, err := lego.LegoClient(config.Certs.Email, provider)
+	client, err := lego.LegoClient(config.Certs.Email, provider, config.LegoDirectory)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	vaultClient, err := vault.NewVaultConnect(config.Vault.Address, config.Vault.Token)
+	vaultClient, err := vault.NewVaultConnect(config.Vault)
 	if err != nil {
 		log.Fatal(err)
 	}

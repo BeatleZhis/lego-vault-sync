@@ -1,0 +1,31 @@
+# Название DNS провайдера
+DNSProvider: regru
+# Настройка подключения к vault (через appRole)
+vault:
+  address: "https://vault.example.com:8800/"
+  authType: approle
+  roleID: 
+  secretID: 
+  token: "aaabbbbbcccc"
+  mountPath: tls
+  requestTimeout: 60
+
+# Настройка подключения к vault (через токен)
+# vault:
+#   address: "https://vault.example.com:8800/"
+#   authType: token
+#   token: "aaabbbbbcccc"
+#   mountPath: tls
+#   requestTimeout: 60
+
+# Список сертификатов для обновления в vault
+certs:
+  # email для LE
+  email: example@example.com
+  # Список доменов
+  domains:
+    - "*.example"
+    - "*stage.example"
+
+# Для проверок используйте тестовое окружение
+# legoDirectory: "production"  # по умолчанию staging

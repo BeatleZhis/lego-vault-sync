@@ -5,12 +5,12 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"log"
 
 	"github.com/go-acme/lego/v4/certificate"
 	"github.com/go-acme/lego/v4/challenge"
 	"github.com/go-acme/lego/v4/lego"
 	"github.com/go-acme/lego/v4/registration"
+	log "github.com/sirupsen/logrus"
 )
 
 type MyUser struct {
@@ -29,7 +29,7 @@ func (u *MyUser) GetPrivateKey() crypto.PrivateKey {
 	return u.key
 }
 
-func LegoClient(email string, dnsProvider challenge.Provider) (*lego.Client, error) {
+func LegoClient(email string, dnsProvider challenge.Provider, legoDirectory string) (*lego.Client, error) {
 	// Create a user. New accounts need an email and private key to start.
 	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -42,7 +42,14 @@ func LegoClient(email string, dnsProvider challenge.Provider) (*lego.Client, err
 	}
 
 	config := lego.NewConfig(&myUser)
-	config.CADirURL = lego.LEDirectoryProduction
+
+	if legoDirectory == "production" {
+		log.Info("Используем Production LE API")
+		config.CADirURL = lego.LEDirectoryProduction
+	} else {
+		log.Info("Используем Staging LE API")
+		config.CADirURL = lego.LEDirectoryStaging
+	}
 
 	client, err := lego.NewClient(config)
 	if err != nil {

@@ -1,6 +1,7 @@
 package vault
 
 import (
+	"BeatleZhis/lego-vault-sync/config"
 	"context"
 	"crypto/x509"
 	"encoding/pem"
@@ -80,22 +81,60 @@ func WriteCert(client *vault.Client, mountPath string, certs *certificate.Resour
 	return nil
 }
 
-func NewVaultConnect(address, token string) (*vault.Client, error) {
+func NewVaultConnect(configVault config.VaultConfig) (*vault.Client, error) {
 
 	// prepare a client with the given base address
 	client, err := vault.New(
-		vault.WithAddress(address),
-		vault.WithRequestTimeout(30*time.Second),
+		vault.WithAddress(configVault.Address),
+		vault.WithRequestTimeout(time.Duration(configVault.RequestTimeoutSec)*time.Second),
 	)
+
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal("unable to initialize vault client: %w", err)
 		return nil, err
 	}
 
-	// authenticate with a root token (insecure)
-	if err := client.SetToken(token); err != nil {
-		log.Fatal(err)
-		return nil, err
+	// Аутентификация в зависимости от типа
+	switch configVault.AuthType {
+	// Token
+	case "token":
+		if configVault.Token == "" {
+			return nil, fmt.Errorf("token must be set for token auth")
+		}
+		if err := client.SetToken(configVault.Token); err != nil {
+			return nil, fmt.Errorf("unable to set token: %w", err)
+		}
+		log.Debug("authenticated with token")
+		// Approle
+	case "approle":
+		if configVault.RoleID == "" || configVault.SecretID == "" {
+			return nil, fmt.Errorf("roleID and secretID must be set for approle auth")
+		}
+
+		// Создаем логин для AppRole
+		loginData := map[string]interface{}{
+			"role_id":   configVault.RoleID,
+			"secret_id": configVault.SecretID,
+		}
+
+		// Выполняем логин
+		ctx := context.Background()
+		resp, err := client.Write(ctx, "/auth/approle/login", loginData)
+		if err != nil {
+			return nil, fmt.Errorf("unable to login with AppRole: %w", err)
+		}
+
+		if resp == nil || resp.Auth == nil {
+			return nil, fmt.Errorf("no auth info returned from AppRole login")
+		}
+
+		// Устанавливаем полученный токен
+		client.SetToken(resp.Auth.ClientToken)
+		log.Debug("authenticated with AppRole")
+
+	default:
+		return nil, fmt.Errorf("unsupported auth type: %s", configVault.AuthType)
 	}
+
 	return client, nil
 }

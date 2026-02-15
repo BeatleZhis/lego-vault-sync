@@ -4,7 +4,7 @@
  .DEFAULT_GOAL := build
  fmt:
 	go fmt ./...
- .PHONY:fmt
+ 
  lint: fmt
 	golint ./...
  .PHONY:lint
@@ -14,3 +14,6 @@
  build: vet
 	go build -o ${BIN_OUTPUT} .
  .PHONY:build
+
+docker: vet
+	docker build . -t lego-vault-sync
