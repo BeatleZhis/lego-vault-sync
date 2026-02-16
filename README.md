@@ -123,3 +123,16 @@ vault:
 
 # Docker
 Собрать в docker можно с помощью команды ```docker build . -t lego-vault-sync```
+
+# FAQ
+<details> <summary>Beget METHOD_FAILED: Failed to get DNS records</summary>
+
+Beget не умеет отдавать данные по домену через API без предварительного создания требуемого поддомена `_acme-challenge.DOMAIN`.
+
+Поэтому необходимо создать виртуальный поддомен:
+
+```bash
+curl  -X POST  -d 'login=<LOGIN>>&passwd=<PASSWORD>&input_format=json&input_data={"subdomain": "_acme-challenge","domain_id": <DOMAIN_ID>}' 'https://api.beget.com/api/domain/addSubdomainVirtual'
+```
+
+</details>
