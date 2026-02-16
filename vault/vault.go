@@ -15,9 +15,7 @@ import (
 	"github.com/hashicorp/vault-client-go/schema"
 )
 
-const refreshDays = 14
-
-func CheckCertValid(client *vault.Client, path, mountPath string) bool {
+func CheckCertValid(client *vault.Client, path string, mountPath string, refreshDays int) bool {
 	ctx := context.Background()
 	secret, err := client.Secrets.KvV2Read(ctx, path, vault.WithMountPath(mountPath))
 	if err != nil {
@@ -29,7 +27,7 @@ func CheckCertValid(client *vault.Client, path, mountPath string) bool {
 
 		t, err := time.Parse(time.RFC3339, value)
 		if err != nil {
-			log.Fatal(err)
+			log.Error(err)
 		}
 		currentDate := time.Now().Truncate(24 * time.Hour)
 		futureDate := t.Truncate(24 * time.Hour)

@@ -79,7 +79,7 @@ func GetCert(client *lego.Client, domains []string) (*certificate.Resource, erro
 	}
 	certificates, err := client.Certificate.Obtain(request)
 	if err != nil {
-		log.Fatal(err)
+		return nil, err
 	}
 
 	return certificates, nil

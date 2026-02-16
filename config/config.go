@@ -7,7 +7,9 @@ type Config struct {
 		Email   string   `yaml:"email"`
 		Domains []string `yaml:"domains,flow"`
 	} `yaml:"certs"`
-	LegoDirectory string `yaml:"legoDirectory"`
+	LegoDirectory           string `yaml:"legoDirectory"`
+	CheckCertIntervalMin    int    `yaml:"checkCertIntervalMin"`
+	CertRefreshIntervalDays int    `yaml:"certRefreshIntervalDays"`
 }
 
 type VaultConfig struct {

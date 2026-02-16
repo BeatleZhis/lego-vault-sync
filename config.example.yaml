@@ -5,7 +5,6 @@ vault:
   address: "https://vault.example.com:8800/"
   authType: approle
   roleID: 
-  secretID: 
   token: "aaabbbbbcccc"
   mountPath: tls
   requestTimeout: 60
@@ -29,3 +28,9 @@ certs:
 
 # Для проверок используйте тестовое окружение
 # legoDirectory: "production"  # по умолчанию staging
+
+# Как часто проверять обновление сертификатов (минут)
+checkCertIntervalMin: 600
+
+# Количество дней до истечения сертификата
+certRefreshIntervalDays: 14
