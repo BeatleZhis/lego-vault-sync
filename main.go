@@ -89,15 +89,16 @@ func main() {
 		log.Fatal(err)
 	}
 
-	vaultClient, err := vault.NewVaultConnect(config.Vault)
-	if err != nil {
-		log.Fatal(err)
-	}
-
 	for {
 		for i := range config.Certs.Domains {
 			domain := config.Certs.Domains[i]
 			log.Info("Проверяем домен ", domain)
+
+			vaultClient, err := vault.NewVaultConnect(config.Vault)
+			if err != nil {
+				log.Fatal(err)
+			}
+
 			// Проверяем что сертификат не отсутвует или его срок менее 14 дней.
 			valid := vault.CheckCertValid(vaultClient, domain, config.Vault.MountPath, config.CertRefreshIntervalDays)
 			if !valid {
