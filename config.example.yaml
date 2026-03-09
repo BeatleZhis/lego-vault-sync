@@ -7,6 +7,7 @@ vault:
   roleID: 
   token: "aaabbbbbcccc"
   mountPath: tls
+  certPath: /
   requestTimeout: 60
 
 # Настройка подключения к vault (через токен)
@@ -15,6 +16,7 @@ vault:
 #   authType: token
 #   token: "aaabbbbbcccc"
 #   mountPath: tls
+#   certPath: certs/          # Сохраняем по пути tls/certs/<DOMAIN>
 #   requestTimeout: 60
 
 # Список сертификатов для обновления в vault

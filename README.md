@@ -110,6 +110,7 @@ vault:
   authType: token
   token: "aaabbbbbcccc"
   mountPath: tls
+  certPath: / 
   requestTimeout: 60
 ```
 

@@ -49,7 +49,7 @@ func CheckCertValid(client *vault.Client, path string, mountPath string, refresh
 
 }
 
-func WriteCert(client *vault.Client, mountPath string, certs *certificate.Resource) error {
+func WriteCert(client *vault.Client, path string, mountPath string, certs *certificate.Resource) error {
 	ctx := context.Background()
 
 	block, _ := pem.Decode(certs.Certificate)
@@ -70,7 +70,7 @@ func WriteCert(client *vault.Client, mountPath string, certs *certificate.Resour
 			"subject":  certsinfo.Subject.CommonName,
 		}}
 
-	_, ok := client.Secrets.KvV2Write(ctx, certs.Domain, schema, vault.WithMountPath(mountPath))
+	_, ok := client.Secrets.KvV2Write(ctx, path, schema, vault.WithMountPath(mountPath))
 	if ok != nil {
 		log.Fatal(ok)
 		return ok

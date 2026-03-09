@@ -99,17 +99,19 @@ func main() {
 				log.Fatal(err)
 			}
 
-			// Проверяем что сертификат не отсутвует или его срок менее 14 дней.
-			valid := vault.CheckCertValid(vaultClient, domain, config.Vault.MountPath, config.CertRefreshIntervalDays)
+			secretPath := config.Vault.CertPath + domain
+
+			// Проверяем что сертификат не отсутвует или его срок менее config.CertRefreshIntervalDays.
+			valid := vault.CheckCertValid(vaultClient, secretPath, config.Vault.MountPath, config.CertRefreshIntervalDays)
 			if !valid {
 				log.Debug("Сертификат ", domain, " требуется обновить.")
 				certs, err := lego.GetCert(client, []string{domain})
 				if err != nil {
 					log.Error("Ошибка обновления сертификата ", err)
 					certUpdateError.WithLabelValues(domain).Inc()
-					break
+					continue
 				}
-				err = vault.WriteCert(vaultClient, config.Vault.MountPath, certs)
+				err = vault.WriteCert(vaultClient, secretPath, config.Vault.MountPath, certs)
 				if err != nil {
 					log.Error("Ошибка записи секрета сертификата ", err)
 				}

@@ -19,5 +19,6 @@ type VaultConfig struct {
 	RoleID            string `yaml:"roleID"`
 	SecretID          string `yaml:"secretID"`
 	MountPath         string `yaml:"mountPath"`
+	CertPath          string `yaml:"certPath"`
 	RequestTimeoutSec int    `yaml:"requestTimeoutSec"`
 }
