@@ -1,125 +1,200 @@
 package main
 
 import (
-	"BeatleZhis/lego-vault-sync/config"
-	"BeatleZhis/lego-vault-sync/lego"
-	"BeatleZhis/lego-vault-sync/vault"
+	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
+
+	"BeatleZhis/lego-vault-sync/config"
+	"BeatleZhis/lego-vault-sync/lego"
+	"BeatleZhis/lego-vault-sync/logging"
+	"BeatleZhis/lego-vault-sync/vault"
 
 	"github.com/go-acme/lego/v4/providers/dns"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	log "github.com/sirupsen/logrus"
+)
 
-	"gopkg.in/yaml.v3"
+const (
+	configPath      = "config.yaml"
+	metricsAddr     = ":8888"
+	shutdownTimeout = 10 * time.Second
 )
 
 func init() {
-	log.SetFormatter(&log.JSONFormatter{})
-	log.SetOutput(os.Stdout)
-	log.SetLevel(log.DebugLevel)
-
-}
-
-func ReadConfig() (config.Config, error) {
-	var cfg config.Config
-	file, err := os.Open("config.yaml")
-	if err != nil {
-		return cfg, err
-	}
-	defer file.Close()
-	decoder := yaml.NewDecoder(file)
-	err = decoder.Decode(&cfg)
-	if err != nil {
-		log.Error("Ошибка десериализации YAML:", err)
-		return cfg, err
-	}
-	return cfg, nil
+	logging.Setup()
 }
 
 func main() {
-	// Create a new registry.
-	reg := prometheus.NewRegistry()
+	if err := run(); err != nil {
+		log.WithError(err).Error("сервис остановлен с ошибкой")
+		os.Exit(1)
+	}
+}
 
-	// Register standard Go and process metrics collectors.
-	reg.MustRegister(
+func run() error {
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return err
+	}
+
+	if err := logging.SetLevel(cfg.LogLevel); err != nil {
+		return fmt.Errorf("неизвестный уровень логирования %q: %w", cfg.LogLevel, err)
+	}
+
+	log.WithFields(log.Fields{
+		"dns_provider":        cfg.DNSProvider,
+		"domains":             cfg.Certs.Domains,
+		"check_interval":      (time.Duration(cfg.CheckCertIntervalMin) * time.Minute).String(),
+		"refresh_before_days": cfg.CertRefreshIntervalDays,
+		"vault_address":       cfg.Vault.Address,
+		"mount_path":          cfg.Vault.MountPath,
+		"auth_type":           cfg.Vault.AuthType,
+		"lego_directory":      cfg.LegoDirectory,
+		"account_secret_path": cfg.Vault.AccountSecretPath(cfg.LegoDirectory),
+		"log_level":           cfg.LogLevel,
+	}).Info("конфигурация загружена")
+
+	registry := prometheus.NewRegistry()
+	registry.MustRegister(
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
 
-	// Define a custom metric: a counter for total HTTP requests.
-	certUpdateError := prometheus.NewCounterVec(
+	certUpdateErrors := prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "lvs_cert_update_errors",
-			Help: "Total number of HTTP requests handled.",
+			Help: "Количество ошибок выпуска и сохранения сертификатов по доменам.",
 		},
 		[]string{"cert"},
 	)
-	reg.MustRegister(certUpdateError)
+	registry.MustRegister(certUpdateErrors)
 
-	// Wrap your handlers to increment the counter and expose metrics.
-	http.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
-	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("ok"))
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.HandlerFor(registry, promhttp.HandlerOpts{}))
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		if _, err := w.Write([]byte("ok")); err != nil {
+			log.WithError(err).Debug("не удалось отправить ответ /health")
+		}
 	})
 
-	// Запускаем HTTP сервер в отдельной горутине
+	server := &http.Server{
+		Addr:              metricsAddr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	// Клиент Vault нужен до создания ACME-клиента: в Vault хранится состояние
+	// аккаунта, поэтому диск пода не требуется.
+	vaultClient, err := vault.NewVaultConnect(cfg.Vault)
+	if err != nil {
+		return fmt.Errorf("не удалось подключиться к Vault: %w", err)
+	}
+
+	accountStore := vault.NewAccountStore(
+		vaultClient,
+		cfg.Vault.MountPath,
+		cfg.Vault.AccountSecretPath(cfg.LegoDirectory),
+	)
+
+	// DNS-провайдер настраивается переменными окружения (см. документацию lego).
+	provider, err := dns.NewDNSChallengeProviderByName(cfg.DNSProvider)
+	if err != nil {
+		return fmt.Errorf("не удалось инициализировать DNS-провайдера %q: %w", cfg.DNSProvider, err)
+	}
+
+	legoClient, err := lego.LegoClient(ctx, cfg.Certs.Email, provider, cfg.LegoDirectory, accountStore)
+	if err != nil {
+		return err
+	}
+
+	serverErr := make(chan error, 1)
 	go func() {
-		log.Info("Запуск HTTP сервера на :8888")
-		if err := http.ListenAndServe(":8888", nil); err != nil {
-			log.Fatal("Ошибка запуска HTTP сервера:", err)
+		log.WithField("addr", metricsAddr).Info("HTTP-сервер запущен")
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serverErr <- fmt.Errorf("HTTP-сервер на %s завершился с ошибкой: %w", metricsAddr, err)
 		}
 	}()
 
-	config, err := ReadConfig()
-	if err != nil {
-		log.Fatal(err)
-	}
-	// DNS provider
-	provider, err := dns.NewDNSChallengeProviderByName(config.DNSProvider)
-	if err != nil {
-		log.Fatal(err)
-	}
-	// Lego client
-	client, err := lego.LegoClient(config.Certs.Email, provider, config.LegoDirectory)
-	if err != nil {
-		log.Fatal(err)
-	}
+	interval := time.Duration(cfg.CheckCertIntervalMin) * time.Minute
+	timer := time.NewTimer(0)
+	defer timer.Stop()
 
 	for {
-		for i := range config.Certs.Domains {
-			domain := config.Certs.Domains[i]
-			log.Info("Проверяем домен ", domain)
-
-			vaultClient, err := vault.NewVaultConnect(config.Vault)
-			if err != nil {
-				log.Fatal(err)
+		select {
+		case <-ctx.Done():
+			log.Info("получен сигнал остановки, завершаем работу")
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+			defer cancel()
+			if err := server.Shutdown(shutdownCtx); err != nil {
+				return fmt.Errorf("не удалось корректно остановить HTTP-сервер: %w", err)
 			}
+			return nil
 
-			secretPath := config.Vault.CertPath + domain
+		case err := <-serverErr:
+			return err
 
-			// Проверяем что сертификат не отсутвует или его срок менее config.CertRefreshIntervalDays.
-			valid := vault.CheckCertValid(vaultClient, secretPath, config.Vault.MountPath, config.CertRefreshIntervalDays)
-			if !valid {
-				log.Debug("Сертификат ", domain, " требуется обновить.")
-				certs, err := lego.GetCert(client, []string{domain})
-				if err != nil {
-					log.Error("Ошибка обновления сертификата ", err)
-					certUpdateError.WithLabelValues(domain).Inc()
-					continue
-				}
-				err = vault.WriteCert(vaultClient, secretPath, config.Vault.MountPath, certs)
-				if err != nil {
-					log.Error("Ошибка записи секрета сертификата ", err)
-				}
-			}
-			log.Debug("Сертификат ", domain, " обновлять не требуется.")
-
+		case <-timer.C:
+			checkAll(ctx, cfg, legoClient, certUpdateErrors)
+			timer.Reset(interval)
 		}
-		time.Sleep(time.Duration(config.CheckCertIntervalMin) * time.Minute)
+	}
+}
+
+// checkAll делает одну итерацию проверки всех доменов из конфигурации.
+func checkAll(ctx context.Context, cfg config.Config, legoClient *lego.Client, updateErrors *prometheus.CounterVec) {
+	// Клиент пересоздаётся на каждой итерации: это заодно продлевает
+	// авторизацию AppRole, если TTL токена меньше интервала проверки.
+	vaultClient, err := vault.NewVaultConnect(cfg.Vault)
+	if err != nil {
+		log.WithError(err).WithField("vault_address", cfg.Vault.Address).
+			Error("не удалось подключиться к Vault, итерация проверки пропущена")
+		return
 	}
 
+	for _, domain := range cfg.Certs.Domains {
+		if ctx.Err() != nil {
+			return
+		}
+
+		secretPath := cfg.Vault.SecretPath(domain)
+		fields := log.Fields{
+			"domain":      domain,
+			"mount_path":  cfg.Vault.MountPath,
+			"secret_path": secretPath,
+		}
+
+		log.WithFields(fields).Info("проверяем сертификат")
+
+		if vault.CheckCertValid(vaultClient, secretPath, cfg.Vault.MountPath, cfg.CertRefreshIntervalDays) {
+			log.WithFields(fields).Debug("сертификат обновлять не требуется")
+			continue
+		}
+
+		certs, err := lego.GetCert(legoClient, []string{domain})
+		if err != nil {
+			log.WithError(err).WithFields(fields).Error("не удалось выпустить сертификат")
+			updateErrors.WithLabelValues(domain).Inc()
+			continue
+		}
+
+		if err := vault.WriteCert(vaultClient, secretPath, cfg.Vault.MountPath, certs); err != nil {
+			log.WithError(err).WithFields(fields).Error("не удалось сохранить сертификат в Vault")
+			updateErrors.WithLabelValues(domain).Inc()
+			continue
+		}
+
+		log.WithFields(fields).Info("сертификат обновлён")
+	}
 }

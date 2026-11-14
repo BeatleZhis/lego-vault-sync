@@ -9,6 +9,7 @@
 - [Авторизация в Vault](#авторизация-в-vault)
   - [AppRole (рекомендуемый способ)](#approle-рекомендуемый-способ)
   - [Token (только для тестирования)](#token-только-для-тестирования)
+- [Логи](#логи)
 
 ## Конфигурация
 
@@ -17,6 +18,28 @@
 ```bash
 cp config.example.yaml config.yaml
 ```
+
+| Ключ | По умолчанию | Описание |
+|---|---|---|
+| `DNSProvider` | — | Код DNS-провайдера lego (`regru`, `cloudflare`, `beget`, …) |
+| `vault.address` | — | Адрес Vault |
+| `vault.authType` | — | `approle` или `token` |
+| `vault.roleID`, `vault.secretID` | — | Учётные данные AppRole (для `authType: approle`) |
+| `vault.token` | — | Токен (для `authType: token`) |
+| `vault.mountPath` | — | Путь KV v2 хранилища (например, `tls`) |
+| `vault.certPath` | `""` | Префикс пути секрета внутри `mountPath` |
+| `vault.requestTimeout` | `60` | Таймаут запроса к Vault, секунды |
+| `certs.email` | — | Email для Let's Encrypt |
+| `certs.domains` | — | Список доменов (wildcard — со звёздочкой) |
+| `legoDirectory` | `staging` | `staging` или `production` |
+| `vault.accountPath` | `acme-account` | Путь секрета с ключом и регистрацией ACME-аккаунта |
+| `checkCertIntervalMin` | `600` | Интервал проверки сертификатов, минуты |
+| `certRefreshIntervalDays` | `14` | За сколько дней до истечения обновлять сертификат |
+| `logLevel` | `debug` | `debug`, `info`, `warn`, `error` |
+
+Значения по умолчанию подставляются, если ключ не указан. Обязательные параметры проверяются при старте: при ошибке в конфигурации сервис завершается сразу, а не в середине цикла обновления.
+
+⚠️ По умолчанию используется **staging** Let's Encrypt. Для боевых сертификатов явно укажите `legoDirectory: production`, иначе браузеры не будут доверять выпущенным сертификатам.
 
 ## DNS-провайдеры
 
@@ -45,13 +68,24 @@ DNSProvider: regru
 vault secrets enable -path=tls kv-v2
 ```
 
-Структура хранения сертификатов.
+### Структура хранения сертификатов
 
-Для каждого домена создаются отдельные секреты:
+Для каждого домена создаётся отдельный секрет по пути:
 
-`tls/data/example.com` - содержит сертификат и ключ для example.com
+```
+<mountPath>/data/<certPath>/<domain>
+```
 
-`tls/data/*.example.com` - содержит wildcard сертификат и ключ
+Например, при `mountPath: tls` и пустом `certPath`:
+
+`tls/data/example.com` — сертификат и ключ для example.com
+
+`tls/data/*.example.com` — wildcard сертификат и ключ
+
+Если указать `certPath: certs`, секреты будут лежать в `tls/data/certs/<domain>`.
+Слэши в `certPath` нормализуются: значения `""`, `/` и `certs/` обрабатываются корректно и не приводят к двойным слэшам в запросах к Vault.
+
+Каждый секрет содержит поля: `cert`, `key`, `ca`, `valid_to` (RFC3339), `subject`.
 
 ## Авторизация в Vault
 
@@ -78,24 +112,26 @@ vault write auth/approle/role/lego-approle \
     token_ttl=24h \
     token_max_ttl=168h
 ```
-4. Получите учетные данные:
+4. Получите учётные данные:
 
 ```
 # Получение RoleID
 vault read auth/approle/role/lego-approle/role-id
 
 # Генерация SecretID
-vault write -force auth/approle/role/lego-approle/secret-id```
+vault write -force auth/approle/role/lego-approle/secret-id
 ```
+
 Настройка в config.yaml:
 
 ```yaml
 vault:
   address: "https://vault.example.com:8800/"
   authType: approle
-  roleID: aaabbbbbcccc
-  secretID: 111111111222
+  roleID: aaabbbbb-cccc-dddd-eeee-ffff00001111
+  secretID: 11111111-2222-3333-4444-555555555555
   mountPath: tls
+  certPath: ""
   requestTimeout: 60
 ```
 
@@ -110,22 +146,66 @@ vault:
   authType: token
   token: "aaabbbbbcccc"
   mountPath: tls
-  certPath: / 
+  certPath: ""
   requestTimeout: 60
 ```
 
-# Процесс работы
+## Состояние ACME-аккаунта
 
-1. Проверка сертификатов - инструмент проверяет текущие сертификаты в Vault
-2. Запрос новых сертификатов - при необходимости запрашивает новые через Lego
-3. DNS-валидация - автоматическое подтверждение владения доменами через DNS-провайдера
-4. Сохранение в Vault - обновленные сертификаты сохраняются в Vault
-5. Периодическое обновление - автоматическое обновление по расписанию
+Ключ и регистрация ACME-аккаунта хранятся **в Vault**, рядом с сертификатами — диск пода не используется и не нужен постоянный том:
 
-# Docker
+```
+tls/data/<accountPath>/staging      # ключ + регистрация для staging
+tls/data/<accountPath>/production   # отдельный секрет для production
+```
+
+Секрет содержит поля `key` (PEM-ключ аккаунта), `registration` (JSON регистрации) и `updated_at`.
+
+- Ключ создаётся один раз и переиспользуется при рестартах пода — новые ACME-аккаунты не регистрируются, лимиты Let's Encrypt на регистрации не расходуются.
+- При старте сохранённая регистрация проверяется на стороне CA. Если аккаунт отозван или удалён, сервис регистрирует его заново и перезаписывает секрет.
+- Для `staging` и `production` используются разные секреты, поэтому окружения не пересекаются.
+- Политика доступа к Vault должна включать чтение и запись этого пути. Политика из примера выше (`path "tls/*"`) уже это покрывает; если ограничиваете права, добавьте `tls/data/<accountPath>/*`.
+- Сервис рассчитан на одну реплику: при нескольких репликах одновременный выпуск сертификатов и запись состояния будут конфликтовать.
+
+## Логи
+
+Сервис пишет логи в stdout в формате JSON (logrus `JSONFormatter`), по одной записи на строку:
+
+```json
+{"level":"info","msg":"сертификат сохранён в Vault","mount_path":"tls","secret_path":"example.com","subject":"example.com","time":"2026-03-09T16:17:15+03:00","valid_to":"2026-06-07T13:17:15Z"}
+```
+
+- Уровень задаётся ключом `logLevel`.
+- Полезные поля: `domain`, `secret_path`, `mount_path`, `days_left`, `valid_to`, `auth_type`.
+- Логи сторонних библиотек тоже приводятся к JSON: записи стандартного логгера Go (`http.Server` и др.) получают поле `"src":"stdlib"`, HTTP-запросы к Vault — `"src":"vault/http"`, сообщения lego — `"src":"lego"`.
+
+## Процесс работы
+
+1. Проверка сертификатов — инструмент проверяет текущие сертификаты в Vault
+2. Запрос новых сертификатов — при необходимости запрашивает новые через Lego
+3. DNS-валидация — автоматическое подтверждение владения доменами через DNS-провайдера
+4. Сохранение в Vault — обновлённые сертификаты сохраняются в Vault
+5. Периодическое обновление — автоматическое обновление по расписанию
+6. Graceful shutdown — по SIGINT/SIGTERM сервис завершает текущую итерацию и корректно останавливает HTTP-сервер
+
+## Метрики
+
+На порту `:8888` доступны:
+- `/metrics` — метрики Prometheus (Go-процесс и `lvs_cert_update_errors{cert="<домен>"}`)
+- `/health` — проверка живости
+
+## Docker
 Собрать в docker можно с помощью команды ```docker build . -t lego-vault-sync```
 
-# FAQ
+`config.yaml` монтируется в корень контейнера: `/config.yaml`.
+
+Постоянный том не нужен: состояние ACME-аккаунта хранится в Vault.
+
+```bash
+docker run -v "$PWD/config.yaml:/config.yaml" lego-vault-sync
+```
+
+## FAQ
 <details> <summary>Beget METHOD_FAILED: Failed to get DNS records</summary>
 
 Beget не умеет отдавать данные по домену через API без предварительного создания требуемого поддомена `_acme-challenge.DOMAIN`.

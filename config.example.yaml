@@ -1,38 +1,51 @@
-# Название DNS провайдера
+# Название DNS-провайдера lego (например: regru, cloudflare, beget)
 DNSProvider: regru
-# Настройка подключения к vault (через appRole)
+
+# Настройка подключения к Vault (AppRole — рекомендуемый способ)
 vault:
   address: "https://vault.example.com:8800/"
   authType: approle
-  roleID: 
-  token: "aaabbbbbcccc"
+  roleID: "aaabbbbb-cccc-dddd-eeee-ffff00001111"
+  secretID: "11111111-2222-3333-4444-555555555555"
   mountPath: tls
-  certPath: /
+  # Префикс пути секрета: tls/data/<certPath>/<domain>.
+  # Пустое значение — секрет называется просто именем домена (tls/data/example.com).
+  # "certs" — секреты лежат в tls/data/certs/example.com.
+  certPath: ""
+  # Путь секрета состояния ACME-аккаунта в KV v2 (ключ и регистрация).
+  # Итоговый путь: tls/data/<accountPath>/<окружение>.
+  accountPath: acme-account
+  # Таймаут одного запроса к Vault, секунды
   requestTimeout: 60
 
-# Настройка подключения к vault (через токен)
+# Настройка подключения к Vault (через токен; не для production)
 # vault:
 #   address: "https://vault.example.com:8800/"
 #   authType: token
-#   token: "aaabbbbbcccc"
+#   token: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 #   mountPath: tls
-#   certPath: certs/          # Сохраняем по пути tls/certs/<DOMAIN>
+#   certPath: "certs"
+#   accountPath: acme-account
 #   requestTimeout: 60
 
-# Список сертификатов для обновления в vault
+# Список сертификатов для обновления в Vault
 certs:
-  # email для LE
+  # email для Let's Encrypt
   email: example@example.com
-  # Список доменов
+  # Список доменов (wildcard-домены указываются со звёздочкой)
   domains:
-    - "*.example"
-    - "*stage.example"
+    - "example.com"
+    - "*.example.com"
 
-# Для проверок используйте тестовое окружение
-# legoDirectory: "production"  # по умолчанию staging
+# Окружение Let's Encrypt: staging (по умолчанию) или production.
+# Для боевых сертификатов обязательно укажите production.
+legoDirectory: staging
 
-# Как часто проверять обновление сертификатов (минут)
+# Как часто проверять обновление сертификатов (минуты)
 checkCertIntervalMin: 600
 
-# Количество дней до истечения сертификата
+# За сколько дней до истечения срока обновлять сертификат
 certRefreshIntervalDays: 14
+
+# Уровень логирования: debug, info, warn, error
+logLevel: info
