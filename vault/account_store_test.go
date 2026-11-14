@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -148,6 +149,38 @@ func TestAccountStoreRejectsSecretWithoutKey(t *testing.T) {
 
 	if _, err := store.LoadAccount(context.Background()); err == nil {
 		t.Fatal("LoadAccount должен вернуть ошибку для секрета без ключа")
+	}
+}
+
+func TestAccountStoreForbiddenHintMentionsPolicy(t *testing.T) {
+	silenceLogs(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"errors":["permission denied"]}`))
+	}))
+	t.Cleanup(server.Close)
+
+	clientConfig := vaultapi.DefaultConfiguration()
+	clientConfig.Address = server.URL
+	clientConfig.RetryConfiguration.RetryMax = 0
+
+	client, err := vaultapi.New(vaultapi.WithConfiguration(clientConfig))
+	if err != nil {
+		t.Fatalf("не удалось создать клиент Vault: %v", err)
+	}
+
+	store := NewAccountStore(client, "devops", "tls/acme-account/production")
+
+	_, err = store.LoadAccount(context.Background())
+	if err == nil {
+		t.Fatal("LoadAccount должен вернуть ошибку при 403")
+	}
+
+	for _, want := range []string{"политику Vault", "devops/data/tls/acme-account/*", "read"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("в ошибке нет подсказки %q: %v", want, err)
+		}
 	}
 }
 

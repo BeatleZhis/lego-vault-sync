@@ -13,6 +13,8 @@ vault:
   # "certs" — секреты лежат в tls/data/certs/example.com.
   certPath: ""
   # Путь секрета состояния ACME-аккаунта в KV v2 (ключ и регистрация).
+  # По умолчанию — <certPath>/acme-account, чтобы политика Vault,
+  # выданная на certPath, покрывала и ключ аккаунта.
   # Итоговый путь: tls/data/<accountPath>/<окружение>.
   accountPath: acme-account
   # Таймаут одного запроса к Vault, секунды

@@ -56,6 +56,34 @@ func TestLoadAppliesDefaults(t *testing.T) {
 	}
 }
 
+func TestAccountPathFollowsCertPath(t *testing.T) {
+	withCertPath := `
+DNSProvider: regru
+vault:
+  address: "https://vault.example.com:8200/"
+  authType: approle
+  roleID: role
+  secretID: secret
+  mountPath: devops
+  certPath: tls/
+certs:
+  email: admin@example.org
+  domains: ["example.com"]
+legoDirectory: production
+`
+	cfg, err := Load(writeConfig(t, withCertPath))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if want := "tls/acme-account"; cfg.Vault.AccountPath != want {
+		t.Fatalf("vault.accountPath = %q, ожидался %q", cfg.Vault.AccountPath, want)
+	}
+	if want := "tls/acme-account/production"; cfg.Vault.AccountSecretPath(cfg.LegoDirectory) != want {
+		t.Fatalf("AccountSecretPath() = %q, ожидался %q", cfg.Vault.AccountSecretPath(cfg.LegoDirectory), want)
+	}
+}
+
 func TestAccountSecretPathSeparatesEnvironments(t *testing.T) {
 	cfg, err := Load(writeConfig(t, minimalConfig+"\nlegoDirectory: production\n"))
 	if err != nil {

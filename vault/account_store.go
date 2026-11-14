@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"path"
 	"strings"
 	"time"
 
@@ -46,12 +47,19 @@ func NewAccountStore(client *vaultapi.Client, mountPath, path string) *AccountSt
 func (s *AccountStore) LoadAccount(ctx context.Context) (*lego.AccountState, error) {
 	secret, err := s.client.Secrets.KvV2Read(ctx, s.path, vaultapi.WithMountPath(s.mountPath))
 	if err != nil {
-		if vaultapi.IsErrorStatus(err, http.StatusNotFound) {
+		switch {
+		case vaultapi.IsErrorStatus(err, http.StatusNotFound):
 			log.WithField("secret_path", s.secretPath()).Debug("состояние ACME-аккаунта в Vault не найдено")
 			return nil, nil
-		}
 
-		return nil, fmt.Errorf("не удалось прочитать состояние ACME-аккаунта %q: %w", s.secretPath(), err)
+		case vaultapi.IsErrorStatus(err, http.StatusForbidden):
+			return nil, fmt.Errorf(
+				"нет прав на чтение состояния ACME-аккаунта %q: добавьте в политику Vault path %q с capabilities [\"read\", \"create\", \"update\"]: %w",
+				s.secretPath(), s.policyPath(), err)
+
+		default:
+			return nil, fmt.Errorf("не удалось прочитать состояние ACME-аккаунта %q: %w", s.secretPath(), err)
+		}
 	}
 	if secret == nil || secret.Data.Data == nil {
 		return nil, fmt.Errorf("Vault вернул пустой секрет состояния ACME-аккаунта %q", s.secretPath())
@@ -82,6 +90,12 @@ func (s *AccountStore) SaveAccount(ctx context.Context, state *lego.AccountState
 	}
 
 	if _, err := s.client.Secrets.KvV2Write(ctx, s.path, request, vaultapi.WithMountPath(s.mountPath)); err != nil {
+		if vaultapi.IsErrorStatus(err, http.StatusForbidden) {
+			return fmt.Errorf(
+				"нет прав на запись состояния ACME-аккаунта %q: добавьте в политику Vault path %q с capabilities [\"read\", \"create\", \"update\"]: %w",
+				s.secretPath(), s.policyPath(), err)
+		}
+
 		return fmt.Errorf("не удалось записать состояние ACME-аккаунта в %q: %w", s.secretPath(), err)
 	}
 
@@ -93,4 +107,15 @@ func (s *AccountStore) SaveAccount(ctx context.Context, state *lego.AccountState
 // secretPath возвращает путь секрета в виде, удобном для логов и ошибок.
 func (s *AccountStore) secretPath() string {
 	return s.mountPath + "/data/" + s.path
+}
+
+// policyPath возвращает путь для политики Vault, покрывающий секреты
+// состояния аккаунта всех окружений: <mount>/data/<accountPath>/*.
+func (s *AccountStore) policyPath() string {
+	parent := path.Dir(s.path)
+	if parent == "." {
+		parent = s.path
+	}
+
+	return s.mountPath + "/data/" + parent + "/*"
 }

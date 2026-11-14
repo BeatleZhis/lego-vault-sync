@@ -32,7 +32,7 @@ cp config.example.yaml config.yaml
 | `certs.email` | — | Email для Let's Encrypt |
 | `certs.domains` | — | Список доменов (wildcard — со звёздочкой) |
 | `legoDirectory` | `staging` | `staging` или `production` |
-| `vault.accountPath` | `acme-account` | Путь секрета с ключом и регистрацией ACME-аккаунта |
+| `vault.accountPath` | `<certPath>/acme-account` | Путь секрета с ключом и регистрацией ACME-аккаунта |
 | `checkCertIntervalMin` | `600` | Интервал проверки сертификатов, минуты |
 | `certRefreshIntervalDays` | `14` | За сколько дней до истечения обновлять сертификат |
 | `logLevel` | `debug` | `debug`, `info`, `warn`, `error` |
@@ -159,12 +159,22 @@ tls/data/<accountPath>/staging      # ключ + регистрация для s
 tls/data/<accountPath>/production   # отдельный секрет для production
 ```
 
+По умолчанию `accountPath` = `<certPath>/acme-account`, то есть ключ аккаунта лежит под тем же
+префиксом, что и сертификаты. Например, при `mountPath: devops` и `certPath: tls/`:
+
+```
+devops/data/tls/example.com                  # сертификат
+devops/data/tls/acme-account/production      # ключ и регистрация ACME-аккаунта
+```
+
+Так одна политика Vault на `devops/data/tls/*` покрывает и сертификаты, и состояние аккаунта.
+
 Секрет содержит поля `key` (PEM-ключ аккаунта), `registration` (JSON регистрации) и `updated_at`.
 
 - Ключ создаётся один раз и переиспользуется при рестартах пода — новые ACME-аккаунты не регистрируются, лимиты Let's Encrypt на регистрации не расходуются.
 - При старте сохранённая регистрация проверяется на стороне CA. Если аккаунт отозван или удалён, сервис регистрирует его заново и перезаписывает секрет.
 - Для `staging` и `production` используются разные секреты, поэтому окружения не пересекаются.
-- Политика доступа к Vault должна включать чтение и запись этого пути. Политика из примера выше (`path "tls/*"`) уже это покрывает; если ограничиваете права, добавьте `tls/data/<accountPath>/*`.
+- Политика доступа к Vault должна включать чтение и запись этого пути. Политика из примера выше (`path "tls/*"`) покрывает и его; при более узких правах добавьте, например, `path "devops/data/tls/acme-account/*" { capabilities = ["read", "create", "update"] }`. При 403 сервис пишет в лог готовый путь для политики.
 - Сервис рассчитан на одну реплику: при нескольких репликах одновременный выпуск сертификатов и запись состояния будут конфликтовать.
 
 ## Логи

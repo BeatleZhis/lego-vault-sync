@@ -94,7 +94,10 @@ func (c *Config) applyDefaults() {
 		c.LegoDirectory = DefaultLegoDirectory
 	}
 	if c.Vault.AccountPath == "" {
-		c.Vault.AccountPath = DefaultAccountSecretPath
+		// По умолчанию держим состояние аккаунта под тем же префиксом, что и
+		// сертификаты: политика Vault, выданная на certPath, тогда покрывает и
+		// ключ ACME-аккаунта (например, certPath "tls/" -> "tls/acme-account").
+		c.Vault.AccountPath = joinPath(c.Vault.CertPath, DefaultAccountSecretPath)
 	}
 	if c.LogLevel == "" {
 		c.LogLevel = DefaultLogLevel
