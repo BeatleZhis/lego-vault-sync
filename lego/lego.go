@@ -6,8 +6,13 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"errors"
 	"fmt"
+	"net/http"
+	"regexp"
+	"time"
 
+	"github.com/go-acme/lego/v4/acme"
 	"github.com/go-acme/lego/v4/certificate"
 	"github.com/go-acme/lego/v4/challenge"
 	legoapi "github.com/go-acme/lego/v4/lego"
@@ -17,6 +22,10 @@ import (
 
 	"BeatleZhis/lego-vault-sync/config"
 )
+
+// accountDoesNotExistErr — тип проблемы ACME, которым CA уверенно сообщает,
+// что аккаунта с таким ключом/URI не существует (RFC 8555, §7.3.3).
+const accountDoesNotExistErr = "urn:ietf:params:acme:error:accountDoesNotExist"
 
 // Client — алиас ACME-клиента lego, чтобы им можно было пользоваться
 // из других пакетов проекта, не импортируя библиотеку lego напрямую.
@@ -53,12 +62,36 @@ func (u *MyUser) GetPrivateKey() crypto.PrivateKey        { return u.key }
 //
 // Ключ и регистрация аккаунта загружаются из AccountStorage (в Kubernetes —
 // Vault), поэтому рестарты пода не создают новых ACME-аккаунтов и не требуют
-// постоянного диска.
+// постоянного диска. Ключ сохраняется в хранилище до регистрации: если
+// обращение к CA не удалось (например, rate limit), повторные попытки
+// используют тот же ключ, и CA возвращает существующий аккаунт вместо
+// создания нового (RFC 8555, §7.3).
+//
+// Ошибки регистрации не считаются фатальными: вызывающий код повторяет
+// попытку позже (см. RetryAfter).
 func LegoClient(
 	ctx context.Context,
 	email string,
 	dnsProvider challenge.Provider,
 	legoDirectory string,
+	store AccountStorage,
+) (*Client, error) {
+	directoryURL := legoapi.LEDirectoryStaging
+	if legoDirectory == config.LegoDirectoryProduction {
+		directoryURL = legoapi.LEDirectoryProduction
+	}
+
+	return legoClientWithDirectory(ctx, email, dnsProvider, legoDirectory, directoryURL, store)
+}
+
+// legoClientWithDirectory — реализация LegoClient с явно заданным URL ACME-
+// директории (для тестов подставляется адрес фейкового CA).
+func legoClientWithDirectory(
+	ctx context.Context,
+	email string,
+	dnsProvider challenge.Provider,
+	legoDirectory string,
+	directoryURL string,
 	store AccountStorage,
 ) (*Client, error) {
 	legolog.Logger = legoLogger{}
@@ -68,8 +101,13 @@ func LegoClient(
 		return nil, fmt.Errorf("не удалось загрузить состояние ACME-аккаунта: %w", err)
 	}
 
-	var privateKey crypto.Signer
-	var storedReg *registration.Resource
+	var (
+		privateKey crypto.Signer
+		storedReg  *registration.Resource
+		// encodedKey — PEM ключа, если он создан в этом вызове; нужен, чтобы
+		// после регистрации сохранить в хранилище полное состояние.
+		encodedKey []byte
+	)
 
 	if state != nil && len(state.Key) > 0 {
 		privateKey, err = parseKey(state.Key)
@@ -91,7 +129,19 @@ func LegoClient(
 			return nil, fmt.Errorf("не удалось сгенерировать ключ ACME-аккаунта: %w", err)
 		}
 
-		log.Info("сохранённый ACME-аккаунт не найден, создаём новый")
+		encodedKey, err = encodeKey(privateKey)
+		if err != nil {
+			return nil, err
+		}
+
+		// Ключ сохраняется до обращения к CA: если регистрация сорвётся
+		// (Vault или CA недоступны, rate limit), повторная попытка возьмёт
+		// из хранилища тот же ключ и не создаст лишний аккаунт.
+		if err := store.SaveAccount(ctx, &AccountState{Key: encodedKey}); err != nil {
+			return nil, fmt.Errorf("не удалось сохранить ключ ACME-аккаунта: %w", err)
+		}
+
+		log.Info("сохранённый ACME-аккаунт не найден: ключ создан и сохранён, регистрируем")
 	}
 
 	myUser := &MyUser{
@@ -101,12 +151,7 @@ func LegoClient(
 	}
 
 	legoConfig := legoapi.NewConfig(myUser)
-
-	if legoDirectory == config.LegoDirectoryProduction {
-		legoConfig.CADirURL = legoapi.LEDirectoryProduction
-	} else {
-		legoConfig.CADirURL = legoapi.LEDirectoryStaging
-	}
+	legoConfig.CADirURL = directoryURL
 
 	log.WithFields(log.Fields{
 		"email":          email,
@@ -123,10 +168,16 @@ func LegoClient(
 	}
 
 	// Проверяем, что сохранённая регистрация ещё действительна на стороне CA
-	// (аккаунт мог быть отозван или удалён).
+	// (аккаунт мог быть отозван или удалён). Повторная регистрация выполняется
+	// только когда CA уверенно сообщает, что аккаунта нет; при временных
+	// ошибках (сеть, rate limit) попытка откладывается, чтобы не создавать
+	// лишние аккаунты и не расходовать лимит регистраций.
 	if myUser.Registration != nil {
 		if _, err := client.Registration.QueryRegistration(); err != nil {
-			log.WithError(err).Warn("сохранённый ACME-аккаунт не подтверждён CA, регистрируем заново")
+			if !accountMissing(err) {
+				return nil, fmt.Errorf("не удалось подтвердить сохранённый ACME-аккаунт у CA, повторим позже: %w", err)
+			}
+			log.WithError(err).Warn("сохранённый ACME-аккаунт отсутствует у CA, регистрируем заново")
 			myUser.Registration = nil
 		}
 	}
@@ -134,13 +185,16 @@ func LegoClient(
 	if myUser.Registration == nil {
 		reg, err := client.Registration.Register(registration.RegisterOptions{TermsOfServiceAgreed: true})
 		if err != nil {
-			return nil, fmt.Errorf("не удалось зарегистрировать ACME-аккаунт: %w", err)
+			return nil, fmt.Errorf("не удалось зарегистрировать ACME-аккаунт, повторим позже: %w", err)
 		}
 		myUser.Registration = reg
 
-		encodedKey, err := encodeKey(privateKey)
-		if err != nil {
-			return nil, err
+		if encodedKey == nil {
+			// Ключ загружен из хранилища, но регистрация там ещё не сохранена.
+			encodedKey, err = encodeKey(privateKey)
+			if err != nil {
+				return nil, err
+			}
 		}
 		encodedReg, err := encodeRegistration(reg)
 		if err != nil {
@@ -170,6 +224,56 @@ func accountURI(reg *registration.Resource) string {
 	}
 
 	return reg.URI
+}
+
+// accountMissing сообщает, что CA уверенно ответил «аккаунта с таким
+// ключом/URI нет» (accountDoesNotExist или 404). Остальные ошибки
+// (сеть, rate limit, 5xx) считаются временными.
+func accountMissing(err error) bool {
+	var pd *acme.ProblemDetails
+	if !errors.As(err, &pd) {
+		return false
+	}
+
+	if pd.Type == accountDoesNotExistErr {
+		return true
+	}
+
+	return pd.HTTPStatus == http.StatusNotFound
+}
+
+// retryAfterRe извлекает время повтора из текста ошибки rate limit
+// Let's Encrypt: "... retry after 2026-11-27 06:04:48 UTC: ...".
+var retryAfterRe = regexp.MustCompile(`retry after (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} [A-Z]{2,5})`)
+
+// RetryAfter возвращает, через сколько можно повторить запрос после ошибки
+// rate limit (429). Время берётся из подсказки CA в тексте ошибки; если
+// подсказки нет или она уже в прошлом, возвращает false.
+func RetryAfter(err error) (time.Duration, bool) {
+	var pd *acme.ProblemDetails
+	if !errors.As(err, &pd) || pd.HTTPStatus != http.StatusTooManyRequests {
+		return 0, false
+	}
+
+	match := retryAfterRe.FindStringSubmatch(pd.Detail)
+	if match == nil {
+		return 0, false
+	}
+
+	// Let's Encrypt указывает время в UTC. Для неизвестного Go сокращения
+	// пояса time.Parse примет нулевое смещение — длительность будет неточной,
+	// что для планирования повтора допустимо.
+	ts, err := time.Parse("2006-01-02 15:04:05 MST", match[1])
+	if err != nil {
+		return 0, false
+	}
+
+	wait := time.Until(ts)
+	if wait <= 0 {
+		return 0, false
+	}
+
+	return wait, true
 }
 
 // GetCert выпускает новый сертификат для указанных доменов.

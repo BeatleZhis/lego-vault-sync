@@ -15,6 +15,7 @@ import (
 	"BeatleZhis/lego-vault-sync/logging"
 	"BeatleZhis/lego-vault-sync/vault"
 
+	"github.com/go-acme/lego/v4/challenge"
 	"github.com/go-acme/lego/v4/providers/dns"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
@@ -26,6 +27,16 @@ const (
 	configPath      = "config.yaml"
 	metricsAddr     = ":8888"
 	shutdownTimeout = 10 * time.Second
+
+	// Пауза между попытками инициализации ACME-клиента (Vault, регистрация
+	// аккаунта у CA). Ошибки инициализации не завершают процесс: сервис
+	// пишет их в лог и повторяет попытку с экспоненциальным бэкоффом,
+	// иначе рестарт пода без сохранённого аккаунта расходует лимит
+	// регистраций Let's Encrypt.
+	initRetryDelay = time.Minute
+	maxRetryDelay  = 30 * time.Minute
+	// Запас поверх Retry-After от CA, чтобы не попасть в лимит на границе окна.
+	retryAfterBuffer = time.Minute
 )
 
 func init() {
@@ -95,28 +106,12 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// Клиент Vault нужен до создания ACME-клиента: в Vault хранится состояние
-	// аккаунта, поэтому диск пода не требуется.
-	vaultClient, err := vault.NewVaultConnect(cfg.Vault)
-	if err != nil {
-		return fmt.Errorf("не удалось подключиться к Vault: %w", err)
-	}
-
-	accountStore := vault.NewAccountStore(
-		vaultClient,
-		cfg.Vault.MountPath,
-		cfg.Vault.AccountSecretPath(cfg.LegoDirectory),
-	)
-
 	// DNS-провайдер настраивается переменными окружения (см. документацию lego).
+	// Отсутствие обязательных переменных — ошибка конфигурации: завершаемся,
+	// чтобы она была видна сразу, а не в середине цикла обновления.
 	provider, err := dns.NewDNSChallengeProviderByName(cfg.DNSProvider)
 	if err != nil {
 		return fmt.Errorf("не удалось инициализировать DNS-провайдера %q: %w", cfg.DNSProvider, err)
-	}
-
-	legoClient, err := lego.LegoClient(ctx, cfg.Certs.Email, provider, cfg.LegoDirectory, accountStore)
-	if err != nil {
-		return err
 	}
 
 	serverErr := make(chan error, 1)
@@ -128,6 +123,13 @@ func run() error {
 	}()
 
 	interval := time.Duration(cfg.CheckCertIntervalMin) * time.Minute
+	retryDelay := initRetryDelay
+
+	// HTTP-сервер и /health доступны с самого старта, даже пока ACME-клиент
+	// не создан (например, при rate limit Let's Encrypt) — оркестратор
+	// не считает под мёртвым и не рестартит его.
+	var legoClient *lego.Client
+
 	timer := time.NewTimer(0)
 	defer timer.Stop()
 
@@ -146,10 +148,66 @@ func run() error {
 			return err
 
 		case <-timer.C:
+			// Клиент создаётся лениво и переживает ошибки: недоступность Vault
+			// или rate limit CA не должны перезапускать под.
+			if legoClient == nil {
+				client, err := initACMEClient(ctx, cfg, provider)
+				if err != nil {
+					if ctx.Err() != nil {
+						// Инициализация прервана сигналом остановки — обработает ветка ctx.Done().
+						continue
+					}
+
+					wait, next := nextInitRetry(err, retryDelay)
+					retryDelay = next
+
+					log.WithError(err).
+						WithField("retry_in", wait.Round(time.Second).String()).
+						Error("не удалось инициализировать ACME-клиент, повторим позже")
+
+					timer.Reset(wait)
+					continue
+				}
+				legoClient = client
+				retryDelay = initRetryDelay
+			}
+
 			checkAll(ctx, cfg, legoClient, certUpdateErrors)
 			timer.Reset(interval)
 		}
 	}
+}
+
+// nextInitRetry вычисляет паузу до следующей попытки инициализации ACME-клиента
+// и новое значение бэкоффа. При rate limit используется подсказка CA
+// (retry after), иначе — экспоненциальный бэкофф с потолком maxRetryDelay.
+func nextInitRetry(err error, retryDelay time.Duration) (wait, next time.Duration) {
+	if after, ok := lego.RetryAfter(err); ok {
+		return after + retryAfterBuffer, retryDelay
+	}
+
+	next = min(retryDelay*2, maxRetryDelay)
+
+	return retryDelay, next
+}
+
+// initACMEClient подключается к Vault и создаёт ACME-клиента, восстанавливая
+// или регистрируя аккаунт. Ошибка (Vault недоступен, rate limit CA и т.п.)
+// не является фатальной: вызывающий код повторит попытку позже, при этом
+// ключ аккаунта уже сохранён в Vault, поэтому новые аккаунты не создаются.
+func initACMEClient(ctx context.Context, cfg config.Config, provider challenge.Provider) (*lego.Client, error) {
+	vaultClient, err := vault.NewVaultConnect(cfg.Vault)
+	if err != nil {
+		return nil, fmt.Errorf("не удалось подключиться к Vault: %w", err)
+	}
+
+	accountStore := vault.NewAccountStore(
+		vaultClient,
+		cfg.Vault.MountPath,
+		cfg.Vault.AccountSecretPath(cfg.LegoDirectory),
+	)
+
+	return lego.LegoClient(ctx, cfg.Certs.Email, provider, cfg.LegoDirectory, accountStore)
 }
 
 // checkAll делает одну итерацию проверки всех доменов из конфигурации.
